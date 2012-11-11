@@ -90,8 +90,7 @@
   (let [answers (apply concat (map :answers results))]
     (reduce
      (fn [scores ans]
-       (update-in scores [(score-adj ans)] inc)
-       )
+       (update-in scores [(score-adj ans)] inc))
      {:right 0
       :wrong 0
       :confused 0
@@ -102,3 +101,71 @@
   (let [hits (q/get-hits hits-file)
         results (with-expected-answers (get-results results-file) hits)]
     (score results)))
+
+(defn question-id->results
+  [results]
+  (reduce
+   (fn [acc result]
+     (update-in acc [(:question-id result)]
+                #(conj % result)))
+   {}
+   results))
+
+(defn consensus-from-answers [answers]
+  (let [freqs (frequencies (map :answer answers))
+        winner (ffirst (filter #(= (val %) 2) freqs))]
+    {:expected-answer (:expected-answer (first answers))
+     :answers answers
+     :answer winner}))
+
+(defn consensus-from-results
+  [results]
+  (reduce
+   (fn [acc idx]
+     (let [answers (map #(nth (get % :answers) idx) results)]
+       (conj acc (consensus-from-answers answers))))
+   []
+   (range 3)))
+
+(defn gather-consensus [results hits]
+  (let [qid->results (question-id->results results)]
+    ;; For each question, pick 3 results and try to find a
+    ;; consensus. Where there's agreement, score based on
+    ;; the correct answer.
+    (reduce
+     (fn [acc [qid results]]
+       (assoc acc qid
+              (consensus-from-results (take 3 results))))
+     {}
+     qid->results)))
+
+(defn score-for-all
+  "Returns an overall score result for all answers.
+   answers must be a sequence of answer hash-map.
+   Each answer must have an :answer and an :expected-answer."
+  [answers]
+  (reduce
+   (fn [scores ans]
+     (update-in scores [(score-adj ans)] inc))
+   {:right 0
+    :wrong 0
+    :confused 0
+    :gimme 0}
+   answers))
+
+(defn do-it []
+  (let [results (get-results "Batch_960038_batch_results.csv")
+        hits    (q/get-hits "underfold-queries.csv")
+        results (with-expected-answers results hits)
+        _ (println "Results count:" (count results))
+        consensi (gather-consensus results hits)
+        _ (println "Consensi count:" (count consensi))
+        answers  (reduce
+                   (fn [acc centry]
+                     (apply conj acc centry))
+                   []
+                   (vals consensi))
+        _ (println "Raw answers:" (count answers))
+        answers (filter :answer answers)
+        ]
+    (score-for-all answers)))
