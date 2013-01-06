@@ -18,14 +18,31 @@
         header (first recs)]
     (map #(make-row header %) (rest recs))))
 
+(defn worker-freqs [results]
+  (frequencies (map #(get % "WorkerId") results)))
+
+(defn hits->answers [results]
+  (reduce
+   (fn [acc res]
+     (update-in acc [(get res "HITId")] conj (get res "Answer.answer")))
+   {}
+   results))
+
+(defn active-turkers [results]
+  (into #{}
+        (map key
+             (filter
+              #(> (val %) 20)
+              (worker-freqs results)))))
+
 (defn groom-answer [a]
-  (condp = a
-    "match" :yes
-    "not a match" :no
-    "not sure" :maybe
-    "different place" :no
-    "same place" :yes
-    nil nil))
+    (condp = a
+      "match" :yes
+      "not a match" :no
+      "not sure" :maybe
+      "different place" :no
+      "same place" :yes
+      nil nil))
 
 (defn parse-answers [raw-result]
   (let [raw-answers (into {} (filter #(.startsWith (key %) "Answer.") raw-result))]
@@ -166,7 +183,7 @@
                  -1)
      :total total}))
 
-(defn assess-by-consensus [results-file hits-file]
+#_(defn assess-by-consensus [results-file hits-file]
   (let [results (get-results results-file)
         hits    (q/get-hits hits-file)
         results (with-expected-answers results hits)
