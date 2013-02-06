@@ -36,16 +36,40 @@
 (defn find-worker-results [worker-id]
   (mc/find-maps "results" {:WorkerId worker-id}))
 
-;;TODO: make-id approach should somehow take spec into consideration (?)
+
+;; Example answer:
+(comment
+{:_id "2e40781b3fd1fd65ff54cac0272bdc5d",
+ :expected "correct",
+ :question
+ {:new-tel "+302103254747",
+  :country "Greece",
+  :locality "Αθήνα",
+  :addr "Χαβρίου 8",
+  :name "Τακοσ Γρηγοριοσ",
+  :factual-id "1b903567-c695-43fb-b7d8-0e7493e163f0"},
+ :notable-keys
+ ["locality" "new-tel" "name" "country" "addr" "factual-id"]}
+)
+
 (defn save-answer
-  "Saves the specified answer record. The record's ID will be generated as a
-   question hash derived from all attr names. This means it may overwrite an existing
-   matching record."
-  [rec notable-keys]
-  (println "save-answer ID:" (make-id rec notable-keys))
-  (mc/save "answers" {:_id  (make-id rec notable-keys)
-                      :data rec
-                      :notable-keys notable-keys}))
+  "Saves the specified answer record.
+
+   The record's ID will be generated as a question hash derived from the
+   entries in :question
+   attr names. This means it may overwrite an existing record, which would
+   indicate we already had saved an answer for the same question.
+
+   Answer structure:
+     {:_id          [id derived from hashing notable entries]
+      :expected     [expected answer value]
+      :question     [input data used to form the corresponding question]
+      :notable-keys [the critical question keys]}
+
+   An answer could also be thought of as 'gold standard data'."
+  [answer]
+  (mc/save "answers"
+           (assoc answer :_id  (make-id (:question answer) (:notable-keys answer)))))
 
 (defn load-answers
   "Loads a batch of answer records from the specified file.
@@ -54,11 +78,15 @@
    every record.
 
    notable-keys indicates the keys in the answer that define the essence of
-   the corresponding question"
+   the corresponding question."
   [file notable-keys]
   (with-open [rdr (clojure.java.io/reader file)]
     (doseq [line (line-seq rdr)]
-      (save-answer (json/parse-string line) notable-keys))))
+      (let [rec (json/parse-string line)]
+        (save-answer
+         {:expected (rec "_EXPECTED_")
+          :question (dissoc rec "_EXPECTED_")
+          :notable-keys notable-keys})))))
 
 (defn save-result
   "Saves the specified result record.
@@ -121,36 +149,55 @@
   (mc/drop "answers")
   (mc/drop "results")
 
-  ;;(load-answers "answer.json" [:locality :new-tel :name :country :addr :factual-id])
-  ;;(load-results "result.csv")
+  (load-answers "answer.json" [:locality :new-tel :name :country :addr :factual-id])
+  (load-results "result.csv")
 
-  (load-answers "gold-standard-tel-moderation.json" NOTABLE-KEYS)
-  (load-results "tel_mod_results.csv")
-
-  )
-
-
-(defn accuracy-score
-  "Returns an accuracy score, Given submitted results and the expected correct answers."
-  [results answers]
-
+  ;;(load-answers "gold-standard-tel-moderation.json" NOTABLE-KEYS)
+  ;;(load-results "tel_mod_results.csv")
 
   )
 
-(defn evaluate-worker [worker-id]
-  (let [results (find-worker-results worker-id)]
-    (doseq [res results]
-      (let [answer (find-answer (:question res) NOTABLE-KEYS)]
+(defn tally
+  "acc looks like:
+     {:right [amt-right]
+      :wrong [amt-wrong]}"
+  [acc {:keys [expected actual]}]
+  (update-in acc
+             [(if (= actual expected) :right :wrong)]
+             inc))
 
-        (println "FID:" (get-in answer [:data :factual-id]))
-        )
+;; Example answer:
+(comment
+{:_id "2e40781b3fd1fd65ff54cac0272bdc5d",
+ :expected "correct",
+ :question
+ {:new-tel "+302103254747",
+  :country "Greece",
+  :locality "Αθήνα",
+  :addr "Χαβρίου 8",
+  :name "Τακοσ Γρηγοριοσ",
+  :factual-id "1b903567-c695-43fb-b7d8-0e7493e163f0"},
+ :notable-keys
+ ["locality" "new-tel" "name" "country" "addr" "factual-id"]}
+)
+(defn accuracy
+  "Returns an accuracy score, given a sequence of pairs, where each pair is a hash-map
+   containing an :expected value and an :actual value."
+  [pairs]
+  (reduce tally {:right 0 :wrong 0} pairs))
 
-      )
+(defn evaluation-pairs [results notable-keys]
+  (map
+   (fn [result]
+     (if-let [answer (find-answer (:question result) notable-keys)]
+       [:expected (:expected answer)
+        ;;todo: this will chang depending on work design
+        :actual   (get-in result [:answer :answer])]
+       (throw (IllegalStateException. "could not find answer for result" (:_id result)))))
+   results))
 
-    )
-
-
-  )
+(defn evaluate-worker [worker-id notable-keys]
+  (accuracy (evaluation-pairs (find-worker-results worker-id) notable-keys)))
 
 
 (comment
