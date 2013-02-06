@@ -36,7 +36,6 @@
 (defn find-worker-results [worker-id]
   (mc/find-maps "results" {:WorkerId worker-id}))
 
-
 ;; Example answer:
 (comment
 {:_id "2e40781b3fd1fd65ff54cac0272bdc5d",
@@ -145,23 +144,26 @@
 (def NOTABLE-KEYS
   [:locality :new-tel :name :country :addr :factual-id])
 
-(defn reset!!! []
-  (mc/drop "answers")
-  (mc/drop "results")
-
-  (load-answers "answer.json" [:locality :new-tel :name :country :addr :factual-id])
-  (load-results "result.csv")
-
-  ;;(load-answers "gold-standard-tel-moderation.json" NOTABLE-KEYS)
-  ;;(load-results "tel_mod_results.csv")
-
-  )
+(defn reset!
+  ([k]
+     (mc/drop "answers")
+     (mc/drop "results")
+     (condp = k
+       :one (do
+              (load-answers "answer.json" [:locality :new-tel :name :country :addr :factual-id])
+              (load-results "result.csv"))
+       :all (do
+               (load-answers "gold-standard-tel-moderation.json" NOTABLE-KEYS)
+               (load-results "tel_mod_results.csv"))))
+  ([]
+     (reset! :all)))
 
 (defn tally
   "acc looks like:
      {:right [amt-right]
       :wrong [amt-wrong]}"
   [acc {:keys [expected actual]}]
+  (println "EXP:" expected "ACT:" actual)
   (update-in acc
              [(if (= actual expected) :right :wrong)]
              inc))
@@ -186,19 +188,42 @@
   [pairs]
   (reduce tally {:right 0 :wrong 0} pairs))
 
-(defn evaluation-pairs [results notable-keys]
-  (map
-   (fn [result]
-     (if-let [answer (find-answer (:question result) notable-keys)]
-       [:expected (:expected answer)
-        ;;todo: this will chang depending on work design
-        :actual   (get-in result [:answer :answer])]
-       (throw (IllegalStateException. "could not find answer for result" (:_id result)))))
-   results))
+(defn evaluation-pairs
+  "Returns a sequence of pairs for accuracy evaluation based on results and
+   notable-keys. For each result, we look for an existing answer in our db,
+   based on notable-keys hashing.
+
+   For each result/answer pair, the returned sequence will contain a hash-map
+   with :expected and :actual.
+
+   If an existing answer is not found for a result, we skip the result, meaning
+   it's not to be tallied."
+  [results notable-keys]
+  (filter identity
+          (map
+           (fn [result]
+             (when-let [answer (find-answer (:question result) notable-keys)]
+               (println "found answer:" answer)
+               {:expected (:expected answer)
+                ;;todo: this will change depending on work design
+                :actual   (get-in result [:answer :answer])}))
+           results)))
 
 (defn evaluate-worker [worker-id notable-keys]
   (accuracy (evaluation-pairs (find-worker-results worker-id) notable-keys)))
 
+;;TODO: we should have a worker collection, but how to keep up to date?
+(defn all-worker-ids []
+  (into #{}
+        (map :WorkerId
+             (mc/find-maps "results" {} ["WorkerId"]))))
+
+(defn evaluate-workers []
+  (reduce
+   (fn [acc wid]
+     (assoc acc wid (evaluate-worker wid NOTABLE-KEYS)))
+   {}
+   (all-worker-ids)))
 
 (comment
 [:locality :new-tel :name :country :addr :factual-id]
