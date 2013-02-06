@@ -7,6 +7,11 @@
 
 (def ^:private work-specs-atom (atom {}))
 
+;; Document collections
+(def VERITIES-COLL "verities")
+(def RESULTS-COLL "results")
+
+
 (defn get-all-work-specs
   "Returns a hash-map of work-spec-name -> work-spec, loaded from db.
    Top level keys are expected to be keywords."
@@ -21,6 +26,11 @@
   "Loads in-memory cache of work specs."
   []
   (reset! work-specs-atom (get-all-work-specs)))
+
+(defn init! []
+  (mg/connect!)
+  (mg/set-db! (mg/get-db "monger-test"))
+  (load-work-specs!))
 
 (defn save-work-spec!
   "Saves work-spec to the db and updates internal cache of work specs.
@@ -37,15 +47,11 @@
   (mc/save "work-specs" (assoc work-spec :_id (:name work-spec)))
   (swap! work-specs-atom assoc (:name work-spec) work-spec))
 
-(defn init! []
-  (mg/connect!)
-  (mg/set-db! (mg/get-db "monger-test"))
-  (load-work-specs!))
-
 (defn normalize-keys [m]
   (into {}
         (for [[k v] m]
           [(name k) v])))
+
 (defn normalize [col] (map name col))
 
 ;;TODO: need to do this intelligently, for many tasks across many projects, etc.
@@ -59,42 +65,40 @@
        (digest/md5 s)))
   ([rec] (make-id rec (keys rec))))
 
-(defn get-notable-keys [work-spec-name]
+(defn get-notable-keys
+  "Gets the notable keys associated with work-spec-name, from cached work specs.
+   Throws IllegalArgumentException if there are no cached work-specs with work-spec-name."
+  [work-spec-name]
   (let [wsname (keyword work-spec-name)]
     (if-let [work-spec (@work-specs-atom wsname)]
       (:notable-keys work-spec)
-      (throw (IllegalArgumentException. (str "Could not find work spec named " wsname ". all specs:" @work-specs-atom))))
-    )
-  )
+      (throw (IllegalArgumentException. (str "Could not find work spec named " wsname ". all specs:" @work-specs-atom))))))
 
 ;;TODO: memoize (?)
-(defn find-answer [question ks]
-  (mc/find-one-as-map "answers" {:_id (make-id question ks)}))
+(defn find-verity [question ks]
+  (mc/find-one-as-map VERITIES-COLL {:_id (make-id question ks)}))
 
 (defn find-worker-results [worker-id]
-  (mc/find-maps "results" {:WorkerId worker-id}))
+  (mc/find-maps RESULTS-COLL {:WorkerId worker-id}))
 
-(defn save-answer
-  "Saves the specified answer record.
+(defn save-verity
+  "Saves the specified verity record.
 
-   The record's ID will be generated as a question hash derived from the
-   entries in :question
-   attr names. This means it may overwrite an existing record, which would
-   indicate we already had saved an answer for the same question.
+   The verity's ID will be generated based on the notable entries of the verity's underlying
+   question. This means it may overwrite an existing verity record, which would
+   indicate we already had saved a verity for the same question.
 
-   Answer structure:
+   verity record structure:
      {:_id          [id derived from hashing notable entries]
-      :expected     [expected answer value]
-      :question     [input data used to form the corresponding question]
-      :notable-keys [the critical question keys]}
+      :expected     [the answer that is conidered correct for the verity's underlying question]
+      :question     [input data representing the underlying question]
+      :notable-keys [the critical question keys]}"
+  [verity]
+  (mc/save VERITIES-COLL
+           (assoc verity :_id (make-id (:question verity) (:notable-keys verity)))))
 
-   An answer could also be thought of as 'gold standard data'."
-  [answer]
-  (mc/save "answers"
-           (assoc answer :_id  (make-id (:question answer) (:notable-keys answer)))))
-
-(defn load-answers
-  "Loads a batch of answer records from the specified file.
+(defn load-verities
+  "Loads a batch of verity records from the specified file into the db.
    Expects one record per line, formatted as JSON.
    There must be an _EXPECTED_ attribute, holding the correct answer for
    every record."
@@ -103,7 +107,7 @@
     (with-open [rdr (clojure.java.io/reader file)]
       (doseq [line (line-seq rdr)]
         (let [rec (json/parse-string line)]
-          (save-answer
+          (save-verity
            {:expected (rec "_EXPECTED_")
             :question (dissoc rec "_EXPECTED_")
             :notable-keys (get-notable-keys work-spec-name)}))))))
@@ -128,9 +132,13 @@
             [k v]))))
 
 (defn result-rec
-  "A raw results record will have a ton of MTurk specific data, e.g. HITTypeId, WorkerId, etc.
-   It will also have an arbitrary set of Answer attributes, headered by Answer.X, where X is
-   the answer attribute name from the task loaded into MTurk. Same for Input.
+  "Returns a proper result record formed from the raw data coming from an
+   incoming MTurk assignment.
+
+   The raw assignment data from MTurk will have a ton of MTurk specific data,
+   e.g. HITTypeId, WorkerId, etc. It will also have an arbitrary set of Answer
+   attributes, headered by Answer.X, where X is the answer attribute name from
+   the task loaded into MTurk. Same for Input.
 
    Mongo won't allow dots in key names. Also, we'd like to have the answer set and input set
    broken out. So we break out the Answer set and Input set into separate hash-maps, also
@@ -138,7 +146,7 @@
 
    We rename the concept of Input to be :question.
 
-   Returned hash-map is the core result record, with a broken-out :question and :answers, like:
+   Returned hash-map is the core result record, with a broken-out :question and :answer, like:
    {'HITTypeID' blah
     'WorkerId' blahblah ...}
     :question {'attrA' 'valA' 'attrB' 'valB' ...}
@@ -151,7 +159,7 @@
       :answer   (no-key-pre answer "Answer."))))
 
 (defn load-results
-  "Loads a batch of results from the specified file.
+  "Loads a batch of results from the specified file into the db.
    Expects the file to be a CSV file, following MTurk's batch results download conventions.
 
    The HITId attribute is used for record IDs."
@@ -182,22 +190,22 @@
 
 (defn evaluation-pairs
   "Returns a sequence of pairs for accuracy evaluation based on results and
-   notable-keys. For each result, we look for an existing answer in our db,
+   notable-keys. For each result, we look for an existing verity in our db,
    based on notable-keys hashing.
 
-   For each result/answer pair, the returned sequence will contain a hash-map
+   For each result/verity pair, the returned sequence will contain a hash-map
    with :expected and :actual.
 
-   If an existing answer is not found for a result, we skip the result, meaning
-   it's not to be tallied."
+   If an existing verity is not found for a result, we skip the result, meaning
+   it's not tallied."
   [results]
   (filter identity
           (map
            (fn [result]
-             (when-let [answer (find-answer (:question result)
+             (when-let [verity (find-verity (:question result)
                                             (get-notable-keys (:work-spec-name result)))]
-               {:expected (:expected answer)
-                ;;todo: this will change depending on work design
+               {:expected (:expected verity)
+                ;;TODO: this will change depending on work design
                 :actual   (get-in result [:answer :answer])}))
            results)))
 
@@ -208,7 +216,7 @@
 (defn all-worker-ids []
   (into #{}
         (map :WorkerId
-             (mc/find-maps "results" {} ["WorkerId"]))))
+             (mc/find-maps RESULTS-COLL {} ["WorkerId"]))))
 
 (defn evaluate-workers []
   (reduce
@@ -220,17 +228,17 @@
 (defn reload!
   ([k]
      (init!)
-     (save-work-spec {:name         :tel-edit
+     (save-work-spec! {:name         :tel-edit
                       :notable-keys [:locality :new-tel :name :country :addr :factual-id]
                       :description  "Determine whether a proposed business telephone edit is correct."})
-     (mc/drop "answers")
-     (mc/drop "results")
+     (mc/drop VERITIES-COLL)
+     (mc/drop RESULTS-COLL)
      (condp = k
        :one (do
-              (load-answers "answer.json" :tel-edit)
+              (load-verities "answer.json" :tel-edit)
               (load-results "result.csv" :tel-edit))
        :all (do
-              (load-answers "gold-standard-tel-moderation.json" :tel-edit)
+              (load-verities "gold-standard-tel-moderation.json" :tel-edit)
               (load-results "tel_mod_results.csv" :tel-edit))))
   ([]
      (reload! :all)))
