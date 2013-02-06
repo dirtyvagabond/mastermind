@@ -8,7 +8,8 @@
 (def ^:private work-specs-atom (atom {}))
 
 (defn get-all-work-specs
-  "Returns a hash-map of work-spec-name -> work-spec, loaded from db"
+  "Returns a hash-map of work-spec-name -> work-spec, loaded from db.
+   Top level keys are expected to be keywords."
   []
   (reduce
    (fn [acc spec]
@@ -70,24 +71,8 @@
 (defn find-answer [question ks]
   (mc/find-one-as-map "answers" {:_id (make-id question ks)}))
 
-;;TODO: need to support ways to categorize results
 (defn find-worker-results [worker-id]
   (mc/find-maps "results" {:WorkerId worker-id}))
-
-;; Example answer:
-(comment
-{:_id "2e40781b3fd1fd65ff54cac0272bdc5d",
- :expected "correct",
- :question
- {:new-tel "+302103254747",
-  :country "Greece",
-  :locality "Αθήνα",
-  :addr "Χαβρίου 8",
-  :name "Τακοσ Γρηγοριοσ",
-  :factual-id "1b903567-c695-43fb-b7d8-0e7493e163f0"},
- :notable-keys
- ["locality" "new-tel" "name" "country" "addr" "factual-id"]}
-)
 
 (defn save-answer
   "Saves the specified answer record.
@@ -189,31 +174,11 @@
              [(if (= actual expected) :right :wrong)]
              inc))
 
-;; Example answer:
-(comment
-{:_id "2e40781b3fd1fd65ff54cac0272bdc5d",
- :expected "correct",
- :question
- {:new-tel "+302103254747",
-  :country "Greece",
-  :locality "Αθήνα",
-  :addr "Χαβρίου 8",
-  :name "Τακοσ Γρηγοριοσ",
-  :factual-id "1b903567-c695-43fb-b7d8-0e7493e163f0"},
- :notable-keys
- ["locality" "new-tel" "name" "country" "addr" "factual-id"]}
-)
 (defn accuracy
   "Returns an accuracy score, given a sequence of pairs, where each pair is a hash-map
    containing an :expected value and an :actual value."
   [pairs]
   (reduce tally {:right 0 :wrong 0} pairs))
-
-#_(defn get-notable-keys
-  [work-spec-name]
-  (if-let [notable-keys (mc/find-one "work-specs" {:_id work-spec-name})]
-    notable-keys
-    (throw (IllegalArgumentException. (str "Could not find a work-spec named " work-spec-name)))))
 
 (defn evaluation-pairs
   "Returns a sequence of pairs for accuracy evaluation based on results and
@@ -270,7 +235,67 @@
   ([]
      (reload! :all)))
 
-(comment
-[:locality :new-tel :name :country :addr :factual-id]
 
+(comment
+  ;;
+  ;; Example answer structure, as it would appear in db:
+  ;;
+  {:_id "2e40781b3fd1fd65ff54cac0272bdc5d",
+   :expected "correct",
+   :question
+   {:new-tel "+302103254747",
+    :country "Greece",
+    :locality "Αθήνα",
+    :addr "Χαβρίου 8",
+    :name "Τακοσ Γρηγοριοσ",
+    :factual-id "1b903567-c695-43fb-b7d8-0e7493e163f0"},
+   :notable-keys
+   ["locality" "new-tel" "name" "country" "addr" "factual-id"]}
+
+  ;;
+  ;; Example result structure, as it would appear in db:
+  ;;
+  {:SubmitTime "Mon Jan 07 02:11:22 GMT 2013",
+   :RequesterAnnotation "BatchId:1001725;",
+   :AutoApprovalDelayInSeconds "3600",
+   :AcceptTime "Mon Jan 07 02:09:46 GMT 2013",
+   :Description
+   "Given specific business information, determine whether the phone number is correct for that business",
+   :AssignmentDurationInSeconds "420",
+   :NumberOfSimilarHITs "",
+   :MaxAssignments "3",
+   :LifetimeInSeconds "",
+   :question
+   {:locality "Αθήνα",
+    :new-tel "+302103254747",
+    :name "Τακοσ Γρηγοριοσ",
+    :country "Greece",
+    :addr "Χαβρίου 8",
+    :factual-id "1b903567-c695-43fb-b7d8-0e7493e163f0",
+    :question-id
+    "1b903567-c695-43fb-b7d8-0e7493e163f0/2012-12-10T08:43:03.529000Z"},
+   :answer
+   {:why_not_sure "unable to locate online or facebook",
+    :source "",
+    :answer "not sure"},
+   :WorkerId "A3NUWV8UAHEDQ1",
+   :AssignmentStatus "Approved",
+   :RejectionTime "",
+   :CreationTime "Fri Jan 04 21:01:24 GMT 2013",
+   :RequesterFeedback "",
+   :Last30DaysApprovalRate "100% (66/66)",
+   :HITId "2XGQ4J3NAB6B6V44BFPIZ1TKC40ER0",
+   :AssignmentId "2M8J2D21O3W5OQP8C6JI8KYIRZPE8I",
+   :WorkTimeInSeconds "96",
+   :ApprovalTime "2013/01/07 03:12:03 +0000",
+   :_id "2XGQ4J3NAB6B6V44BFPIZ1TKC40ER0",
+   :Title "Verify if a phone number is correct",
+   :AutoApprovalTime "Mon Jan 07 03:11:22 GMT 2013",
+   :LifetimeApprovalRate "100% (66/66)",
+   :work-spec-name "tel-edit",
+   :Keywords "data collection, telephone, verify",
+   :Reward "$0.10",
+   :HITTypeId "2FYCOW0LGRZ3ZLG48TXVTUZWD358ZQ",
+   :Expiration "Tue Jan 08 09:01:24 GMT 2013",
+   :Last7DaysApprovalRate "100% (66/66)"}
 )
