@@ -5,9 +5,41 @@
             [clojure-csv.core :as csv]
             [cheshire.core :as json]))
 
+(def ^:private work-specs-atom (atom {}))
+
+(defn get-all-work-specs
+  "Returns a hash-map of work-spec-name -> work-spec, loaded from db"
+  []
+  (reduce
+   (fn [acc spec]
+     (assoc acc (keyword (:name spec)) spec))
+   {}
+   (mc/find-maps "work-specs" {})))
+
+(defn load-work-specs!
+  "Loads in-memory cache of work specs."
+  []
+  (reset! work-specs-atom (get-all-work-specs)))
+
+(defn save-work-spec!
+  "Saves work-spec to the db and updates internal cache of work specs.
+
+   A work spec describes the kind of work being done. It must have:
+     unique :name
+     :notable-keys vector
+
+   Example:
+     {:name         :tel-edit
+      :notable-keys [:locality :new-tel :name :country :addr :factual-id]
+      :description  'Determine whether a proposed business telephone edit is correct.'}"
+  [work-spec]
+  (mc/save "work-specs" (assoc work-spec :_id (:name work-spec)))
+  (swap! work-specs-atom assoc (:name work-spec) work-spec))
+
 (defn init! []
   (mg/connect!)
-  (mg/set-db! (mg/get-db "monger-test")))
+  (mg/set-db! (mg/get-db "monger-test"))
+  (load-work-specs!))
 
 (defn normalize-keys [m]
   (into {}
@@ -23,13 +55,19 @@
            s (apply str (map
                          #(str % \= (rec %))
                          (sort (normalize ks))))]
-       (println "make-id" s)
        (digest/md5 s)))
   ([rec] (make-id rec (keys rec))))
 
+(defn get-notable-keys [work-spec-name]
+  (let [wsname (keyword work-spec-name)]
+    (if-let [work-spec (@work-specs-atom wsname)]
+      (:notable-keys work-spec)
+      (throw (IllegalArgumentException. (str "Could not find work spec named " wsname ". all specs:" @work-specs-atom))))
+    )
+  )
+
 ;;TODO: memoize (?)
 (defn find-answer [question ks]
-  (println "find-answer" (make-id question ks))
   (mc/find-one-as-map "answers" {:_id (make-id question ks)}))
 
 ;;TODO: need to support ways to categorize results
@@ -74,22 +112,21 @@
   "Loads a batch of answer records from the specified file.
    Expects one record per line, formatted as JSON.
    There must be an _EXPECTED_ attribute, holding the correct answer for
-   every record.
-
-   notable-keys indicates the keys in the answer that define the essence of
-   the corresponding question."
-  [file notable-keys]
-  (with-open [rdr (clojure.java.io/reader file)]
-    (doseq [line (line-seq rdr)]
-      (let [rec (json/parse-string line)]
-        (save-answer
-         {:expected (rec "_EXPECTED_")
-          :question (dissoc rec "_EXPECTED_")
-          :notable-keys notable-keys})))))
+   every record."
+  [file work-spec-name]
+  (let [work-specs (get-all-work-specs)]
+    (with-open [rdr (clojure.java.io/reader file)]
+      (doseq [line (line-seq rdr)]
+        (let [rec (json/parse-string line)]
+          (save-answer
+           {:expected (rec "_EXPECTED_")
+            :question (dissoc rec "_EXPECTED_")
+            :notable-keys (get-notable-keys work-spec-name)}))))))
 
 (defn save-result
   "Saves the specified result record.
-   The HITId attribute is used for record's ID."
+   The HITId attribute is used for record's ID.
+   rec should include an entry for :work-spec-name"
   [rec]
   (mc/save "results" (assoc rec :_id  (rec "HITId"))))
 
@@ -133,37 +170,21 @@
    Expects the file to be a CSV file, following MTurk's batch results download conventions.
 
    The HITId attribute is used for record IDs."
-  [file]
+  [file work-spec-name]
   (with-open [rdr (clojure.java.io/reader file)]
     (let [recs (csv/parse-csv rdr)
           header (first recs)
           recs (rest recs)]
       (doseq [rec recs]
-        (save-result (result-rec (zipmap header rec)))))))
-
-(def NOTABLE-KEYS
-  [:locality :new-tel :name :country :addr :factual-id])
-
-(defn reset!
-  ([k]
-     (mc/drop "answers")
-     (mc/drop "results")
-     (condp = k
-       :one (do
-              (load-answers "answer.json" [:locality :new-tel :name :country :addr :factual-id])
-              (load-results "result.csv"))
-       :all (do
-               (load-answers "gold-standard-tel-moderation.json" NOTABLE-KEYS)
-               (load-results "tel_mod_results.csv"))))
-  ([]
-     (reset! :all)))
+        (save-result
+         (assoc (result-rec (zipmap header rec))
+                :work-spec-name work-spec-name))))))
 
 (defn tally
   "acc looks like:
      {:right [amt-right]
       :wrong [amt-wrong]}"
   [acc {:keys [expected actual]}]
-  (println "EXP:" expected "ACT:" actual)
   (update-in acc
              [(if (= actual expected) :right :wrong)]
              inc))
@@ -188,6 +209,12 @@
   [pairs]
   (reduce tally {:right 0 :wrong 0} pairs))
 
+#_(defn get-notable-keys
+  [work-spec-name]
+  (if-let [notable-keys (mc/find-one "work-specs" {:_id work-spec-name})]
+    notable-keys
+    (throw (IllegalArgumentException. (str "Could not find a work-spec named " work-spec-name)))))
+
 (defn evaluation-pairs
   "Returns a sequence of pairs for accuracy evaluation based on results and
    notable-keys. For each result, we look for an existing answer in our db,
@@ -198,19 +225,19 @@
 
    If an existing answer is not found for a result, we skip the result, meaning
    it's not to be tallied."
-  [results notable-keys]
+  [results]
   (filter identity
           (map
            (fn [result]
-             (when-let [answer (find-answer (:question result) notable-keys)]
-               (println "found answer:" answer)
+             (when-let [answer (find-answer (:question result)
+                                            (get-notable-keys (:work-spec-name result)))]
                {:expected (:expected answer)
                 ;;todo: this will change depending on work design
                 :actual   (get-in result [:answer :answer])}))
            results)))
 
-(defn evaluate-worker [worker-id notable-keys]
-  (accuracy (evaluation-pairs (find-worker-results worker-id) notable-keys)))
+(defn evaluate-worker [worker-id]
+  (accuracy (evaluation-pairs (find-worker-results worker-id))))
 
 ;;TODO: we should have a worker collection, but how to keep up to date?
 (defn all-worker-ids []
@@ -221,9 +248,27 @@
 (defn evaluate-workers []
   (reduce
    (fn [acc wid]
-     (assoc acc wid (evaluate-worker wid NOTABLE-KEYS)))
+     (assoc acc wid (evaluate-worker wid)))
    {}
    (all-worker-ids)))
+
+(defn reload!
+  ([k]
+     (init!)
+     (save-work-spec {:name         :tel-edit
+                      :notable-keys [:locality :new-tel :name :country :addr :factual-id]
+                      :description  "Determine whether a proposed business telephone edit is correct."})
+     (mc/drop "answers")
+     (mc/drop "results")
+     (condp = k
+       :one (do
+              (load-answers "answer.json" :tel-edit)
+              (load-results "result.csv" :tel-edit))
+       :all (do
+              (load-answers "gold-standard-tel-moderation.json" :tel-edit)
+              (load-results "tel_mod_results.csv" :tel-edit))))
+  ([]
+     (reload! :all)))
 
 (comment
 [:locality :new-tel :name :country :addr :factual-id]
