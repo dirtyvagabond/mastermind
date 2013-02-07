@@ -92,7 +92,8 @@
      {:_id          [id derived from hashing notable entries]
       :expected     [the answer that is conidered correct for the verity's underlying question]
       :question     [input data representing the underlying question]
-      :notable-keys [the critical question keys]}"
+      :notable-keys [the critical question keys]
+      :provenance   [a structure that details verity origin]}"
   [verity]
   (mc/save VERITIES-COLL
            (assoc verity :_id (make-id (:question verity) (:notable-keys verity)))))
@@ -106,18 +107,22 @@
   (let [work-specs (get-all-work-specs)]
     (with-open [rdr (clojure.java.io/reader file)]
       (doseq [line (line-seq rdr)]
-        (let [rec (json/parse-string line)]
+        (let [rec (json/parse-string line)
+              provenance {:file (str file)
+                          :host (.getHostName (java.net.InetAddress/getLocalHost))
+                          :time (.getTime (java.util.Date.))}]
           (save-verity
            {:expected (rec "_EXPECTED_")
             :question (dissoc rec "_EXPECTED_")
-            :notable-keys (get-notable-keys work-spec-name)}))))))
+            :notable-keys (get-notable-keys work-spec-name)
+            :provenance provenance}))))))
 
 (defn save-result
   "Saves the specified result record.
-   The HITId attribute is used for record's ID.
+   The AssignmentID attribute is used for record's ID.
    rec should include an entry for :work-spec-name"
   [rec]
-  (mc/save "results" (assoc rec :_id  (rec "HITId"))))
+  (mc/save "results" (assoc rec :_id  (rec "AssignmentId"))))
 
 (defn split-by-key-pre [m pre]
   (let [groups (group-by #(.startsWith (key %) pre) m)]
@@ -181,6 +186,16 @@
   (update-in acc
              [(if (= actual expected) :right :wrong)]
              inc))
+
+(defn summarize-results
+  "Runs a summarization of all results that were submitted for the
+   HIT specified by hit-id.
+
+   answer-fn is the function to apply to the :answer of the result
+   in order to pull out the actual value submitted by the turker."
+  [hit-id answer-fn]
+  (let [results (mc/find-maps RESULTS-COLL {:HITId hit-id})]
+    (frequencies (map (comp :answer answer-fn) results))))
 
 (defn accuracy
   "Returns an accuracy score, given a sequence of pairs, where each pair is a hash-map
